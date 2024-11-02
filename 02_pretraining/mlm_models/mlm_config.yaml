@@ -5,27 +5,28 @@ dataset_config:
   batch_size: 128
   database_retrieval:
     form_tenk:
-      limit: 1000
+      limit: 100000
       offset: 0
     form_eightk:
-      limit: 1000
+      limit: 100000
       offset: 0
     earning_calls:
-      limit: 1000
+      limit: 100000
       offset: 0
     tr_news: 
-      limit: 1000
+      limit: 100000
       offset: 0 
     esg_reports:
       limit: 100000
       offset: 0
 model_config:
-  embedding_size: 128
-  hidden_size: 256
+  embedding_size: 256
+  hidden_size: 512
   num_hidden_layers: 12
   num_attention_heads: 4
   intermediate_size: 1024
   max_position_embeddings: 256
+  model_name: "roformer"
 optimization_config:
   learning_rate: 0.0001
   n_epochs: 10

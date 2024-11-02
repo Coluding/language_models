@@ -4,7 +4,7 @@ from dataclasses import asdict
 from finlm.dataset import FinLMDataset
 from transformers import ElectraConfig, ElectraForMaskedLM, ElectraForPreTraining, ElectraPreTrainedModel, ElectraModel
 from transformers import get_linear_schedule_with_warmup
-from finlm.config import FinLMConfig
+from finlm.config import FinLMConfig, EncoderConfig
 from finlm.callbacks import CallbackManager, CallbackTypes, AbstractCallback
 import pandas as pd
 import numpy as np
@@ -21,7 +21,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torcheval.metrics.functional import binary_precision, binary_recall
 from typing import Optional, Any, List
 import copy
-
+from transformers import PreTrainedModel, RoFormerForMaskedLM, RoFormerConfig, LongformerForMaskedLM, LongformerConfig
 import logging
 
 logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
@@ -30,6 +30,76 @@ logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=lo
 #########################################################################################################################
 # Models for pretraining
 #########################################################################################################################
+
+
+def transformer_lm_factory(model_name: str, config: FinLMConfig, dataset: FinLMDataset):
+    match model_name:
+        case "roformer":
+            model_config = RoFormerConfig(vocab_size=dataset.tokenizer.vocab_size,
+                                          embedding_size=config.model_config.embedding_size,
+                                          hidden_size=config.model_config.hidden_size,
+                                          num_hidden_layers=config.model_config.num_hidden_layers,
+                                          num_attention_heads=config.model_config.num_attention_heads,
+                                          intermediate_size=config.model_config.intermediate_size,
+                                          max_position_embeddings=config.model_config.max_position_embeddings,
+                                          pad_token_id=dataset.tokenizer.pad_token_id,
+                                          eos_token_id=dataset.tokenizer.eos_token_id,
+                                          bos_token_id=dataset.tokenizer.bos_token_id, # Check what ahppens when none
+                                          sep_token_id=dataset.tokenizer.sep_token_id,)
+
+            lm = RoFormerForMaskedLM(model_config)
+
+        case "longformer":
+
+            if not hasattr(config.model_config, "attention_window"):
+                raise ValueError("Attention window must be specified for Longformer model.")
+
+            model_config = LongformerConfig(vocab_size=dataset.tokenizer.vocab_size,
+                                            embedding_size=config.model_config.embedding_size,
+                                            hidden_size=config.model_config.hidden_size,
+                                            num_hidden_layers=config.model_config.num_hidden_layers,
+                                            num_attention_heads=config.model_config.num_attention_heads,
+                                            intermediate_size=config.model_config.intermediate_size,
+                                            max_position_embeddings=config.model_config.max_position_embeddings,
+                                            attention_window=config.model_config.attention_window,
+                                            pad_token_id=dataset.tokenizer.pad_token_id,
+                                            eos_token_id=dataset.tokenizer.eos_token_id,
+                                            bos_token_id=dataset.tokenizer.bos_token_id, # Check what ahppens when none
+                                            sep_token_id=dataset.tokenizer.sep_token_id,)
+
+            lm = LongformerForMaskedLM(model_config)
+
+        case "electra":
+            model_config = ElectraConfig(vocab_size=dataset.tokenizer.vocab_size,
+                                         embedding_size=config.model_config.embedding_size,
+                                         hidden_size=config.model_config.hidden_size,
+                                         num_hidden_layers=config.model_config.num_hidden_layers,
+                                         num_attention_heads=config.model_config.num_attention_heads,
+                                         max_position_embeddings=config.model_config.max_position_embeddings,
+                                         eos_token_id=dataset.tokenizer.eos_token_id,
+                                         bos_token_id=dataset.tokenizer.bos_token_id,
+                                         sep_token_id=dataset.tokenizer.sep_token_id,
+                                         pad_token_id=dataset.tokenizer.pad_token_id,)
+
+            lm = ElectraForMaskedLM(model_config)
+
+        case _:
+            raise ValueError(f"Model name {model_name} not supported.")
+
+    return lm, model_config
+
+
+def generator_lm_factory(discriminator_config: FinLMConfig, dataset:FinLMDataset,
+                         generator_size: float = 0.25, model_name: str = "electra"):
+    generator_config = copy.deepcopy(discriminator_config)
+    generator_config.model_config.hidden_size = int(generator_config.model_config.hidden_size * generator_size)
+    generator_config.model_config.intermediate_size = int(generator_config.model_config.intermediate_size * generator_size)
+    generator_config.model_config.num_hidden_layers = int(generator_config.model_config.num_hidden_layers * generator_config.model_config.generator_layer_size)
+    generator_config.model_config.num_attention_heads = int(generator_config.model_config.num_attention_heads * generator_size)
+
+    generator, generator_config = transformer_lm_factory(model_name, generator_config, dataset)
+
+    return generator, generator_config
 
 class PretrainLM:
     """
@@ -1232,3 +1302,298 @@ class ElectraDocumentClassification(ElectraPreTrainedModel):
             hidden_states=None,
             attentions=attention_probs,
         )
+
+class PretrainMLM2(PretrainLM):
+    """
+    A class for pretraining a Masked Language Model (MLM) using the FinLM framework.
+
+    This class inherits from `PretrainLM` and provides specific implementations for
+    preparing data, loading the model, and training the Masked Language Model (MLM).
+
+    Attributes
+    ----------
+    config : FinLMConfig
+        Configuration object containing dataset, model, and optimization configurations.
+    dataset : FinLMDataset
+        The dataset prepared for MLM training.
+    model : ElectraForMaskedLM
+        The Electra model configured for masked language modeling.
+    optimizer : torch.optim.Optimizer
+        The optimizer used for training.
+    scheduler : torch.optim.lr_scheduler.LambdaLR
+        The learning rate scheduler used during training.
+    iteration_steps_per_epoch : int
+        Number of iteration steps per training epoch.
+    logger : logging.Logger
+        Logger instance for logging messages related to training.
+    device : torch.device
+        Device on which computations will be performed (CPU or CUDA).
+
+    Methods
+    -------
+    load_model() -> None
+        Loads and configures the Electra model for masked language modeling.
+    load_optimization() -> None
+        Sets up the optimizer and learning rate scheduler based on the optimization configuration.
+    prepare_data_model_optimizer() -> None
+        Prepares the dataset, model, and optimizer for training.
+    train() -> None
+        Trains the masked language model and saves the results and model.
+    """
+
+    def __init__(self, config):
+
+        """
+        Initializes the PretrainMLM class with the given configuration.
+
+        Parameters
+        ----------
+        config : FinLMConfig
+            Configuration object containing dataset, model, and optimization configurations.
+        """
+
+        super().__init__(config)
+        self.prepare_data_model_optimizer()
+
+        self.training_state = None
+        self.global_step = 0
+
+        self.config_change = False
+
+        self.callback_manager.execute_callbacks("after_init", self)
+
+    def add_callback(self, callback: AbstractCallback):
+        self.callback_manager.add_callback(callback)
+
+    def load_model(self, rebuild_model_config: bool = True):
+
+        """
+        Loads and configures the Electra model for masked language modeling.
+
+        This method initializes the Electra model using the configuration settings,
+        including vocabulary size, embedding size, hidden size, and other model parameters.
+        The model is then moved to the appropriate device (CPU or GPU).
+        """
+
+        if rebuild_model_config:
+            self.model_config.vocab_size = self.dataset.tokenizer.vocab_size
+
+        model, model_config = transformer_lm_factory(self.config.model_config.model_name, self.config, self.dataset)
+        self.model = model
+        self.config_change = False
+        self.model.to(self.device)
+        self.callback_manager.execute_callbacks("after_load_modal", self.model)
+
+    def adjust_config(self, key, value):
+        """
+        Adjusts the model configuration with a new value for a specified key.
+
+        This method allows for modifying any of the model configuration parameters
+        such as `embedding_size`, `hidden_size`, `num_hidden_layers`, and others.
+
+        Args:
+            key (str): The configuration parameter to be adjusted.
+            value (any): The new value to be set for the specified parameter.
+
+        Raises:
+            ValueError: If the specified key does not exist in the model configuration.
+        """
+        self.config_change = True
+        if hasattr(self.model_config, key):
+            setattr(self.model_config, key, value)
+            self.logger.info(f"Model configuration '{key}' updated to {value}.")
+        else:
+            raise ValueError(f"Key '{key}' does not exist in the model configuration.")
+
+    def prepare_data_model_optimizer(self):
+
+        """
+        Prepares the dataset, model, and optimizer for training.
+
+        This method calls the appropriate methods to load the dataset, load the model,
+        and set up the optimizer and learning rate scheduler.
+        """
+
+        self.load_dataset()
+        self.load_model()
+        self.load_optimization()
+
+    def evaluate(self, eval_metrics=dict,
+                 dataset: datasets.Dataset = None,
+                 metric_key_prefix: str = "eval",
+                 num_steps: int = None,
+                 verbose: bool = True):
+        """
+        Runs evaluation on n steps. Requires eval dataset.
+        Returns
+        -------
+
+        """
+        if dataset is None:
+            dataset = self.dataset.hf_dataset
+
+        self.logger.info("Starting with evaluation...")
+        eval_steps = num_steps  # TODO: Make this variable
+        self.eval_batch_size = 4  # TODO: Make this variable
+        eval_inds = np.random.random_integers(0, len(dataset), eval_steps)
+        sampled_dataset = dataset.select(eval_inds)
+        dataloader = DataLoader(sampled_dataset, batch_size=self.eval_batch_size, shuffle=False)
+        self.model.eval()
+        eval_loss = 0
+        eval_accuracy = 0
+        n_batches = 0
+        with torch.no_grad():
+            runs = 0
+            with tqdm(range(eval_steps), desc=f"Evaluation Loop: ") as iterator:
+                for batch in dataloader:
+                    inputs, attention_mask = batch["input_ids"].to(self.device), batch["attention_mask"].to(self.device)
+                    inputs, labels = self.mask_tokens(
+                        inputs,
+                        mlm_probability=self.optimization_config.mlm_probability,
+                        mask_token_id=self.dataset.mask_token_id,
+                        special_token_ids=self.dataset.special_token_ids,
+                        n_tokens=self.dataset.tokenizer.vocab_size
+                    )
+
+                    mlm_output = self.model(input_ids=inputs, attention_mask=attention_mask, labels=labels)
+                    loss, logits = mlm_output.loss, mlm_output.logits
+                    masked_ids_mask = inputs == self.dataset.tokenizer.mask_token_id
+                    predictions = logits.argmax(-1)
+                    eval_accuracy += (predictions[masked_ids_mask] == labels[masked_ids_mask]).float().mean()
+                    eval_loss += loss.item()
+                    iterator.update(self.eval_batch_size)
+                    runs += 1
+
+            final_accuracy = eval_accuracy / runs
+            final_loss = eval_loss / runs
+
+            eval_metrics[metric_key_prefix + "_accuracy"].append(final_accuracy)
+            eval_metrics[metric_key_prefix + "_loss"].append(final_loss)
+
+            self.callback_manager.execute_callbacks("after_eval", final_accuracy, final_loss, self.global_step)
+
+            if verbose:
+                self.logger.info(f"Evaluation results at step [{self.global_step}] of {metric_key_prefix} dataset: "
+                                 f"MLM Accuracy: {final_accuracy:.4f} --- MLM Loss: {final_loss:.4f}")
+
+            return eval_metrics
+
+    def train_epoch(self, epoch: int, training_metrics: dict, info_step: int = 100, num_steps: int = None,
+                    verbose: bool = True, tqdm_iterator: tqdm = None):
+
+        internal_steps = 0
+
+        if self.config_change:
+            warnings.warn("You changed the model config but did not reload the model. Your changes did therefore not "
+                          "affect the model architecture.")
+
+        break_flag = True if num_steps is None else False
+        if num_steps is None:
+            num_steps = float("inf")
+
+        while internal_steps < num_steps:
+
+            for batch_id, batch in enumerate(self.dataset):
+                self.callback_manager.execute_callbacks("before_batch_processing", batch_id, batch)
+                inputs, attention_mask = batch["input_ids"].to(self.device), batch["attention_mask"].to(self.device)
+
+                inputs, labels = self.mask_tokens(
+                    inputs,
+                    mlm_probability=self.optimization_config.mlm_probability,
+                    mask_token_id=self.dataset.mask_token_id,
+                    special_token_ids=self.dataset.special_token_ids,
+                    n_tokens=self.dataset.tokenizer.vocab_size)
+
+                mlm_output = self.model(input_ids=inputs, attention_mask=attention_mask, labels=labels)
+                mlm_loss, mlm_logits = mlm_output.loss, mlm_output.logits
+                training_metrics["loss"].append(mlm_loss.item())
+
+                self.optimizer.zero_grad()
+                mlm_loss.backward()
+
+                if self.optimization_config.use_gradient_clipping:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+                mlm_grads = [p.grad.detach().flatten() for p in self.model.parameters() if p.grad is not None]
+                mlm_grad_norm = torch.cat(mlm_grads).norm()
+
+                self.optimizer.step()
+                self.scheduler.step()
+
+                with torch.no_grad():
+                    masked_ids_mask = inputs == self.dataset.tokenizer.mask_token_id
+                    predictions = mlm_logits.argmax(-1)
+                    mlm_accuracy = (predictions[masked_ids_mask] == labels[masked_ids_mask]).float().mean()
+
+                training_metrics["accuracy"].append(mlm_accuracy.item())
+                training_metrics["gradient_norms"].append(mlm_grad_norm.item())
+                current_lr = self.scheduler.get_last_lr()[0]
+                training_metrics["learning_rates"].append(current_lr)
+
+                self.callback_manager.execute_callbacks("on_batch_end", self.global_step, mlm_loss, mlm_accuracy.item(),
+                                                        mlm_grad_norm.item(), current_lr)
+                self.global_step += 1
+                internal_steps += 1
+
+                if tqdm_iterator is not None:
+                    tqdm_iterator.update()
+
+                if batch_id % info_step == 0 and verbose:
+                    self.logger.info(
+                        f"Results after {batch_id / self.iteration_steps_per_epoch:.4%} iterations of epoch {epoch + 1}:")
+                    self.logger.info(f"MLM loss: {mlm_loss.item():.4f}")
+                    self.logger.info(f"Gradient norm: {mlm_grad_norm:.4f}")
+                    self.logger.info(f"Current learning rate: {current_lr}")
+                    self.logger.info(f"Accuracy for masking task: {mlm_accuracy.item():.4f}")
+                    self.logger.info("-" * 100)
+
+                if internal_steps > num_steps:
+                    break_flag = True
+                    break
+
+            if break_flag:
+                break
+
+        self.callback_manager.execute_callbacks("after_epoch", epoch, training_metrics)
+
+        return training_metrics
+
+    def train(self):
+        self.logger.info("Starting with training...")
+        self.training_state = []
+        eval_step = 1000  # TODO: make variable --- currently not used --> later for evaluation
+        info_step = 100  # TODO: make variable
+        training_metrics = {
+            "loss": [],
+            "accuracy": [],
+            "gradient_norms": [],
+            "learning_rates": []
+        }
+
+        self.callback_manager.execute_callbacks("before_training")
+
+        self.global_step = 0  # use global steps instead of epochs and batches
+        for epoch in range(self.optimization_config.n_epochs):
+            self.dataset.set_dataset_offsets(epoch)
+            self.dataset.prepare_data_loader()
+            self.callback_manager.execute_callbacks("on_epoch_start", epoch)
+
+            self.train_epoch(epoch, training_metrics, info_step)
+
+        self.logger.info("...training is finished, saving results and model.")
+
+        save_path = self._create_directory_and_return_save_path(model_type="mlm")
+        training_metrics_df = pd.DataFrame(training_metrics)
+        training_metrics_df.to_csv(save_path + "training_metrics.csv", index=False)
+        training_metrics_df.loc[:, ["loss"]].plot()
+        plt.savefig(save_path + "loss.png")
+        training_metrics_df.loc[:, ["accuracy"]].plot()
+        plt.savefig(save_path + "accuracy.png")
+        self.model.save_pretrained(save_path + "mlm_model")
+        self.config.to_json(save_path + "model_config.json")
+
+        self.logger.info("Results and model are saved.")
+
+
+
+

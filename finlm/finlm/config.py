@@ -65,6 +65,10 @@ class ModelConfig:
         Scaling factor for the generator size (default is 0.25).
     generator_layer_size : float, optional
         Scaling factor for the generator layer size (default is 1.0).
+    model_name : str, optional
+        Name of the model architecture (default is "electra").
+    attention_window: int, optional
+        Size of the attention window (default is 256). Only used for Longformer.
 
     Methods
     -------
@@ -80,6 +84,22 @@ class ModelConfig:
     max_position_embeddings: int = 256
     generator_size: float = 0.25
     generator_layer_size: float = 1.0
+    model_name: str = "electra"
+    attention_window: int = 128
+
+
+@dataclass
+class EncoderConfig:
+    model_name: str
+    embedding_size: int = 128
+    hidden_size: int = 256
+    num_hidden_layers: int = 12
+    num_attention_heads: int = 4
+    intermediate_size: int = 1024
+    max_position_embeddings: int = 256
+    hidden_act: str = "gelu"
+    hidden_dropout_prob: float = 0.1
+
 
 @dataclass
 class OptimizationConfig:

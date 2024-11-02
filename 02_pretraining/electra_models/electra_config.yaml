@@ -28,6 +28,7 @@ model_config:
   max_position_embeddings: 256
   generator_size: 0.25
   generator_layer_size: 1.0
+  model_name: "roformer"
 optimization_config:
   learning_rate: 0.0001
   n_epochs: 10
